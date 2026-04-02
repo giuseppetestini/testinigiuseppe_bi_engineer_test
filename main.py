@@ -1,14 +1,13 @@
 import sqlite3
 import logging
+import csv
 from datetime import datetime, timedelta
 
-# Path del database SQLite locale
+# Configurazione base
 DB_PATH = "data/power_bi_metadata.db"
-
-# Nome della tabella che conterrà il dataset analytics-ready
 TABLE_NAME = "power_bi_asset_analytics"
+CSV_OUTPUT_PATH = "data/output.csv"
 
-# Configurazione base del logging per tracciare l'esecuzione dello script
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -17,8 +16,9 @@ logging.basicConfig(
 
 def fetch_mock_metadata():
     """
-    Simula la risposta di una piattaforma BI API (in questo caso Power BI).
-    Restituisce una lista di asset con metadata utili per il monitoraggio BI.
+    Simula una risposta della Power BI REST API.
+    In una versione reale, questa funzione verrebbe sostituita
+    da chiamate API autenticate.
     """
     return [
         {
@@ -65,13 +65,8 @@ def fetch_mock_metadata():
 
 def derive_status(refresh_status, last_viewed):
     """
-    Calcola uno status derivato utile all'analisi.
-
-    Regole:
-    - Se il refresh è fallito -> Refresh Failed
-    - Se l'ultima visualizzazione risale a più di 30 giorni fa -> Stale
-    - Se il report/dashboard è stato visto recentemente -> Active
-    - Se mancano informazioni sufficienti -> Unknown
+    Calcola uno status derivato per il monitoraggio BI.
+    TODO: assicurati di saper spiegare questa logica al colloquio.
     """
     if refresh_status == "Failed":
         return "Refresh Failed"
@@ -80,50 +75,46 @@ def derive_status(refresh_status, last_viewed):
         last_viewed_dt = datetime.fromisoformat(last_viewed)
         if datetime.now() - last_viewed_dt > timedelta(days=30):
             return "Stale"
-        else:
-            return "Active"
+        return "Active"
 
     return "Unknown"
 
 
 def transform_metadata(raw_data):
     """
-    Trasforma i metadata grezzi in un dataset analytics-ready
-    con schema coerente e campo derivato 'status'.
+    Trasforma i metadata grezzi in un dataset analytics-ready.
     """
     transformed = []
-
-    # Timestamp unico di sincronizzazione per tutto il run corrente
     sync_time = datetime.now().isoformat()
 
-    for r in raw_data:
-        status = derive_status(r["refresh_status"], r["last_viewed"])
-
-        record = {
-            "asset_id": r["id"],
-            "asset_name": r["name"],
-            "asset_type": r["type"],
-            "owner": r["owner"],
-            "workspace_name": r["workspace"],
-            "last_updated_at": r["last_updated"],
-            "last_viewed_at": r["last_viewed"],
-            "views_last_30d": r["views_last_30d"],
-            "last_refresh_at": r["last_refresh"],
-            "refresh_status": r["refresh_status"],
-            "refresh_frequency": r["refresh_frequency"],
-            "status": status,
+    for record in raw_data:
+        transformed_record = {
+            "asset_id": record["id"],
+            "asset_name": record["name"],
+            "asset_type": record["type"],
+            "owner": record["owner"],
+            "workspace_name": record["workspace"],
+            "last_updated_at": record["last_updated"],
+            "last_viewed_at": record["last_viewed"],
+            "views_last_30d": record["views_last_30d"],
+            "last_refresh_at": record["last_refresh"],
+            "refresh_status": record["refresh_status"],
+            "refresh_frequency": record["refresh_frequency"],
+            "status": derive_status(
+                record["refresh_status"],
+                record["last_viewed"]
+            ),
             "last_synced_at": sync_time
         }
 
-        transformed.append(record)
+        transformed.append(transformed_record)
 
     return transformed
 
 
 def create_table(conn):
     """
-    Crea la tabella SQLite se non esiste già.
-    La tabella rappresenta il layer analytics-ready del task.
+    Crea la tabella di output se non esiste già.
     """
     query = f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
@@ -149,10 +140,9 @@ def create_table(conn):
 
 def upsert_assets(conn, records):
     """
-    Inserisce o aggiorna i record nella tabella SQLite.
-    Usa INSERT OR REPLACE per simulare una logica di upsert semplice.
+    Inserisce o aggiorna i record nello storage SQLite.
     """
-    for r in records:
+    for record in records:
         conn.execute(f"""
         INSERT OR REPLACE INTO {TABLE_NAME} VALUES (
             :asset_id,
@@ -169,38 +159,56 @@ def upsert_assets(conn, records):
             :status,
             :last_synced_at
         )
-        """, r)
+        """, record)
 
     conn.commit()
     logging.info(f"Upsert completed for {len(records)} records")
 
 
+def export_to_csv(records, path=CSV_OUTPUT_PATH):
+    """
+    Esporta il dataset finale in CSV per renderlo leggibile su GitHub.
+    """
+    if not records:
+        logging.warning("No records to export")
+        return
+
+    fieldnames = records[0].keys()
+
+    with open(path, mode="w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+
+    logging.info(f"CSV exported to {path}")
+
+
 def main():
     """
-    Orchestrazione principale dello script:
-    1. Recupera i metadata
-    2. Li trasforma nello schema finale
-    3. Crea/verifica la tabella
-    4. Salva i dati nel database SQLite
+    Orchestrazione principale:
+    1. Recupera metadata
+    2. Trasforma i dati
+    3. Salva su SQLite
+    4. Esporta CSV
     """
     logging.info("Script started")
-
     conn = None
 
     try:
-        raw = fetch_mock_metadata()
-        logging.info(f"Fetched {len(raw)} records")
+        raw_data = fetch_mock_metadata()
+        logging.info(f"Fetched {len(raw_data)} records")
 
-        transformed = transform_metadata(raw)
+        transformed_data = transform_metadata(raw_data)
 
         conn = sqlite3.connect(DB_PATH)
         create_table(conn)
-        upsert_assets(conn, transformed)
+        upsert_assets(conn, transformed_data)
+        export_to_csv(transformed_data)
 
         logging.info("Data successfully saved")
 
-    except Exception as e:
-        logging.error(f"Error during execution: {e}")
+    except Exception as error:
+        logging.error(f"Error during execution: {error}")
         raise
 
     finally:
@@ -213,14 +221,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
-
-cursor.execute(f"SELECT * FROM {TABLE_NAME}")
-rows = cursor.fetchall()
-
-for row in rows:
-    print(row)
-
-conn.close()
